@@ -173,6 +173,7 @@ class SARSA:
 import cv2
 import torch
 import random
+from copy import copy
 from tensordict import TensorDict
 from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage
 #from queue import Queue 
@@ -210,11 +211,17 @@ class DQNAgent():
         self.target_net     = DQN(input_shape, num_actions)
         self.optimizer
         self.loss           = torch.nn.MSELoss()
-        self.short_memory   = []                                                           # All images stored are gray
-        self.short_memory_size =  short_memory_size
+        self.short_memory   = [np.zeros(input_shape, dtype=np.uint8)] * short_memory_size                                                            # All images stored are gray
+        #self.short_memory_size =  short_memory_size
 
-        
-    def state_preprocessor(self, state: np.ndarray) -> np.ndarray:
+    
+    def _rgb_2_gray(self, img: np.ndarray) -> np.ndarray:
+        img = img[:,:,::-1]                                                                 # Shape: (H, W, C)
+        img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)                                    # Shape: (H, W)
+        return img_gray
+    
+    
+    def _state_preprocessor(self, state: np.ndarray, short_memory: list) -> np.ndarray:
         """
         Makes input RGB np.uint8 image to GRAY scale and returns
         a stack of the most recent images stored in short_memory.
@@ -231,65 +238,62 @@ class DQNAgent():
                         dtype: np.uint8
         """
         # State is now in BGR  
-        state = state[:,:,::-1]                                                             # Shape: (H, W, C)
-        state_gray = cv2.cvtColor(state, cv2.COLOR_BGR2GRAY)                                # Shape: (H, W)
+        state_gray = self._rgb_2_gray(state)                                                # Shape: (H, W)
+        _ = short_memory.pop(0)
+        short_memory.append(state_gray)
+        return np.array(short_memory)                                                       # Shape: (SHORT_MEMORY_SIZE, H, W)
         
-        if len(self.short_memory) == self.short_memory_size:
-            _ = self.short_memory.pop(0)
-        self.short_memory.append(state_gray)
-        
-        return np.array(self.short_memory)                                                  # Shape: (C, H, W)
         
     def store_experience(self, experience: tuple[np.ndarray, int, float, np.ndarray]) -> None:
-        """_summary_
+        """
+        Stores experience tuple in replay buffer/memory
 
         Args:
             experience (tuple[np.ndarray, int, float, np.ndarray]): _description_
         """
         state, action, reward, next_state = experience
-        processed_state = self.state_preprocessor(state)
         
-        if processed_state.shape[0] == 4:
-            self.memory.add(
-                TensorDict(
-                    {
-                        "state": torch.tensor(processed_state),
-                        "action": torch.tensor(action),
-                        "reward": torch.tensor(reward),
-                        "next_state": torch.tensor(next_state)
-                    }
-                )
-                
+        # self.short_memory will also be updated when used in self._state_preprocessor
+        processed_state = self._state_preprocessor(state, self.short_memory)                 # Shape: (SHORT_MEMORY_SIZE, H, W)
+        self.memory.add(
+            TensorDict(
+                {
+                    "state": torch.tensor(processed_state),
+                    "action": torch.tensor(action),
+                    "reward": torch.tensor(reward),
+                    "next_state": torch.tensor(next_state)
+                }
             )
+            
+        )
     
     
-    def epsilon_greedy_policy(self, state: np.ndarray, epsilon: float):
+    def react(self, state: np.ndarray, epsilon: float):
+        # GREEDY POLICY
         # state: needs to handle both single and batch
-        short_memory_cp = self.short_memory
-        prob = torch.rand(1)
-        batch_size = state.shape[0]
-        current_q_values = self.actor_net(state)                                            # Shape: (batch_size, num_actions)
         
+        prob = torch.rand(1)     
         if prob < epsilon:
-            # random action
-            q_indices = torch.randint(low=0, high=self.num_actions, size=(batch_size,))     # Shape: (batch_size,)
-            q_values = current_q_values[torch.arange(batch_size), q_indices]                # Shape: (batch_size,)
+            # Random action
+            q_idx = torch.randint(low=0, high=self.num_actions, size=(1,))                  # Shape: (1,)
         else:
-            # greedy action
-            max_q = torch.max(current_q_values, dim=-1, keepdim=False)                      
-            q_indices = max_q.indices                                                       # Shape: (batch_size,)
-            q_values  = max_q.values                                                        # Shape: (batch_size,)
-        
-        return q_indices, q_values                                                          # Shape: (batch_size,), (batch_size,)
+            # Greedy action
+            short_memory_cp = copy(self.short_memory)
+            processed_state = self._state_preprocessor(state, short_memory_cp)
+            processed_state = torch.tensor(processed_state[np.newaxis, :, :, :])            # Shape: (1, SHORT_MEMORY_SIZE, H, W)
+            q_values = self.actor_net(processed_state)                                      # Shape: (1, num_actions)
+            max_q = torch.max(q_values, dim=-1, keepdim=False)                      
+            q_idx = max_q.indices                                                           # Shape: (1,)
+        return q_idx                                                                    
         
 
     def learn(self):
         self.optimizer.zero_grad()
         batch = self.memory.sample()           
-        states      = batch["state"]                                                        # shape: (NOT YET DEFINE)
+        states      = batch["state"]                                                        # shape: (batch_size, SHORT_MEMORY_SIZE, H, W)
         actions     = batch["action"]                                                       # shape: (batch_size,)
         rewards     = batch["reward"]                                                       # shape: (batch_size,)
-        next_states = batch["next_state"]                                                   # shape: (NOT YET DEFINE)
+        next_states = batch["next_state"]                                                   # shape: (batch_size, SHORT_MEMORY_SIZE, H, W)
         
         next_state_q_values = self.target_net(next_states)                                  # shape: (batch_size, num_actions)
         next_state_max_q_values = torch.max(next_state_q_values, dim=-1).values             # shape: (batch_size,)
