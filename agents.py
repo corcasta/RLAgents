@@ -178,9 +178,9 @@ from tensordict import TensorDict
 from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage
 #from queue import Queue 
 class DQN(torch.nn.Module):
-    def __init__(self, img_shape, num_actions):
+    def __init__(self, img_shape, num_input_channels, num_actions):
         super().__init__()
-        self.conv1  = torch.nn.Conv2d(in_channels=4, out_channels=16, kernel_size=8)
+        self.conv1  = torch.nn.Conv2d(in_channels=num_input_channels, out_channels=16, kernel_size=8)
         self.activ1 = torch.nn.ReLU()
         self.conv2  = torch.nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)
         self.activ2 = torch.nn.ReLU()
@@ -203,15 +203,16 @@ class DQN(torch.nn.Module):
     
 class DQNAgent():
     def __init__(self, input_shape, num_actions, memory_size, short_memory_size, batch_size, epsilon):
+        C, H, W, = input_shape
         self.memory = TensorDictReplayBuffer(storage=LazyTensorStorage(max_size=memory_size), batch_size=32)
         self.batch_size     = batch_size
         self.num_actions    = num_actions
         self.epsilon        = epsilon
-        self.actor_net      = DQN(input_shape, num_actions)
-        self.target_net     = DQN(input_shape, num_actions)
-        self.optimizer
+        self.actor_net      = DQN(input_shape, short_memory_size, num_actions)
+        self.target_net     = DQN(input_shape, short_memory_size, num_actions)
+        self.optimizer      = torch.optim.Adam(params=self.actor_net.parameters()) 
         self.loss           = torch.nn.MSELoss()
-        self.short_memory   = [np.zeros(input_shape, dtype=np.uint8)] * short_memory_size                                                            # All images stored are gray
+        self.short_memory   = [np.zeros((H, W), dtype=np.uint8)] * short_memory_size                                                            # All images stored are gray
         #self.short_memory_size =  short_memory_size
 
     
@@ -268,19 +269,20 @@ class DQNAgent():
         )
     
     
-    def react(self, state: np.ndarray, epsilon: float):
+    def react(self, state: np.ndarray):
         # GREEDY POLICY
         # state: needs to handle both single and batch
         
         prob = torch.rand(1)     
-        if prob < epsilon:
+        if prob < self.epsilon:
             # Random action
             q_idx = torch.randint(low=0, high=self.num_actions, size=(1,))                  # Shape: (1,)
         else:
             # Greedy action
             short_memory_cp = copy(self.short_memory)
             processed_state = self._state_preprocessor(state, short_memory_cp)
-            processed_state = torch.tensor(processed_state[np.newaxis, :, :, :])            # Shape: (1, SHORT_MEMORY_SIZE, H, W)
+            processed_state = torch.tensor(processed_state[np.newaxis, :, :, :], 
+                                           dtype=torch.float32)                             # Shape: (1, SHORT_MEMORY_SIZE, H, W)
             q_values = self.actor_net(processed_state)                                      # Shape: (1, num_actions)
             max_q = torch.max(q_values, dim=-1, keepdim=False)                      
             q_idx = max_q.indices                                                           # Shape: (1,)
