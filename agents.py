@@ -182,6 +182,7 @@ class DQN(torch.nn.Module):
         super().__init__()
         self.conv1  = torch.nn.Conv2d(in_channels=num_input_channels, out_channels=16, kernel_size=8)
         self.activ1 = torch.nn.ReLU()
+        
         self.conv2  = torch.nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)
         self.activ2 = torch.nn.ReLU()
         
@@ -189,6 +190,7 @@ class DQN(torch.nn.Module):
         self.dense1 = torch.nn.Linear(in_features=torch.flatten(self.conv2(self.conv1(sample))).shape[0], 
                                       out_features=256)
         self.activ3 = torch.nn.ReLU()
+        
         self.dense2 = torch.nn.Linear(in_features=256, out_features=num_actions) 
         self.activ4 = torch.nn.ReLU()
         del sample
@@ -196,7 +198,7 @@ class DQN(torch.nn.Module):
     def forward(self, x):
         x = self.activ1(self.conv1(x))
         x = self.activ2(self.conv2(x))
-        x = torch.flatten(x)
+        x = torch.flatten(x, start_dim=1)
         x = self.activ3(self.dense1(x))
         x = self.activ4(self.dense2(x))
         return x
@@ -259,10 +261,10 @@ class DQNAgent():
         self.memory.add(
             TensorDict(
                 {
-                    "state": torch.tensor(processed_state),
-                    "action": torch.tensor(action),
-                    "reward": torch.tensor(reward),
-                    "next_state": torch.tensor(next_state)
+                    "state": torch.tensor(processed_state, dtype=torch.float32),
+                    "action": torch.tensor(action, dtype=torch.float32),
+                    "reward": torch.tensor(reward, dtype=torch.float32),
+                    "next_state": torch.tensor(next_state,  dtype=torch.float32)
                 }
             )
             
@@ -297,14 +299,20 @@ class DQNAgent():
         rewards     = batch["reward"]                                                       # shape: (batch_size,)
         next_states = batch["next_state"]                                                   # shape: (batch_size, SHORT_MEMORY_SIZE, H, W)
         
-        next_state_q_values = self.target_net(next_states)                                  # shape: (batch_size, num_actions)
-        next_state_max_q_values = torch.max(next_state_q_values, dim=-1).values             # shape: (batch_size,)
-        target_q_values = rewards + self.gamma*next_state_max_q_values                      # shape: (batch_size,)
+        print(f"states shape: {states.shape}")
+        print(f"actions shape: {actions.shape}")
+        print(f"rewards shape: {rewards.shape}")
+        print(f"next_states shape: {next_states.shape}")
+        
+        #next_state_q_values = self.target_net(next_states)                                  # shape: (batch_size, num_actions)
+        #next_state_max_q_values = torch.max(next_state_q_values, dim=-1).values             # shape: (batch_size,)
+        #target_q_values = rewards + self.gamma*next_state_max_q_values                      # shape: (batch_size,)
+        print(type(states))
         
         state_q_values = self.actor_net(states)                                             # shape: (batch_size, num_actions)
-        current_q_values = state_q_values[torch.arange(self.batch_size), actions]           # shape: (batch_size,)
-        self.loss(current_q_values, target_q_values)                                        # shape: (1,)
-        self.loss.backward()
-        # We should be only updating self.actor NO self.target yet
-        self.optimizer.step()
+        #current_q_values = state_q_values[torch.arange(self.batch_size), actions]           # shape: (batch_size,)
+        #self.loss(current_q_values, target_q_values)                                        # shape: (1,)
+        #self.loss.backward()
+        ## We should be only updating self.actor NO self.target yet
+        #self.optimizer.step()
         
