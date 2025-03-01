@@ -178,15 +178,15 @@ from tensordict import TensorDict
 from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage
 #from queue import Queue 
 class DQN(torch.nn.Module):
-    def __init__(self, img_shape, num_input_channels, num_actions):
+    def __init__(self, input_shape, num_actions):
         super().__init__()
-        self.conv1  = torch.nn.Conv2d(in_channels=num_input_channels, out_channels=16, kernel_size=8)
+        self.conv1  = torch.nn.Conv2d(in_channels=input_shape[0], out_channels=16, kernel_size=8)
         self.activ1 = torch.nn.ReLU()
         
         self.conv2  = torch.nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)
         self.activ2 = torch.nn.ReLU()
         
-        sample = torch.rand(size=(img_shape))
+        sample = torch.rand(size=(input_shape))
         self.dense1 = torch.nn.Linear(in_features=torch.flatten(self.conv2(self.conv1(sample))).shape[0], 
                                       out_features=256)
         self.activ3 = torch.nn.ReLU()
@@ -202,50 +202,47 @@ class DQN(torch.nn.Module):
         x = self.activ3(self.dense1(x))
         x = self.activ4(self.dense2(x))
         return x
-    
+
+def state_preprocessor(state: np.ndarray, short_memory: list) -> np.ndarray:
+    """
+    Makes input RGB np.uint8 image to GRAY scale and returns
+    a stack of the most recent images stored in short_memory.
+
+    Args:
+        state (np.ndarray): RGB image. 
+                            Shape: (H,W,3) 
+                            dtype: np.uint8 
+
+    Returns:
+        np.ndarray: stack of the most recent images stored in 
+                    short_memory.
+                    Shape: (short_memory_size, H, W)
+                    dtype: np.uint8
+    """
+    # State is now in BGR                                                  # Shape: (H, W)
+    state_gray = cv2.cvtColor(state[:,:,::-1], cv2.COLOR_BGR2GRAY) 
+    _ = short_memory.pop(0)
+    short_memory.append(state_gray)
+    return np.array(short_memory)   
+        
 class DQNAgent():
-    def __init__(self, input_shape, num_actions, memory_size, short_memory_size, batch_size, epsilon):
-        C, H, W, = input_shape
+    def __init__(self, input_shape, num_actions, memory_size, batch_size, epsilon, device):
+        self.input_shape = input_shape
         self.memory = TensorDictReplayBuffer(storage=LazyTensorStorage(max_size=memory_size), batch_size=32)
         self.batch_size     = batch_size
         self.num_actions    = num_actions
         self.epsilon        = epsilon
-        self.actor_net      = DQN(input_shape, short_memory_size, num_actions)
-        self.target_net     = DQN(input_shape, short_memory_size, num_actions)
+        self.actor_net      = DQN(input_shape, num_actions).to(device)
+        self.target_net     = DQN(input_shape, num_actions).to(device)
         self.optimizer      = torch.optim.Adam(params=self.actor_net.parameters()) 
-        self.loss           = torch.nn.MSELoss()
-        self.short_memory   = [np.zeros((H, W), dtype=np.uint8)] * short_memory_size                                                            # All images stored are gray
-        #self.short_memory_size =  short_memory_size
-
-    
-    def _rgb_2_gray(self, img: np.ndarray) -> np.ndarray:
-        img = img[:,:,::-1]                                                                 # Shape: (H, W, C)
-        img_gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)                                    # Shape: (H, W)
-        return img_gray
-    
-    
-    def _state_preprocessor(self, state: np.ndarray, short_memory: list) -> np.ndarray:
-        """
-        Makes input RGB np.uint8 image to GRAY scale and returns
-        a stack of the most recent images stored in short_memory.
-
-        Args:
-            state (np.ndarray): RGB image. 
-                                Shape: (H,W,3) 
-                                dtype: np.uint8 
-
-        Returns:
-            np.ndarray: stack of the most recent images stored in 
-                        short_memory.
-                        Shape: (short_memory_size, H, W)
-                        dtype: np.uint8
-        """
-        # State is now in BGR  
-        state_gray = self._rgb_2_gray(state)                                                # Shape: (H, W)
-        _ = short_memory.pop(0)
-        short_memory.append(state_gray)
-        return np.array(short_memory)                                                       # Shape: (SHORT_MEMORY_SIZE, H, W)
+        self.criterion      = torch.nn.MSELoss()
+        self.device         = device
+        self.gamma = 0.99
+        # Deactivating target network parameters for updating through backpropagation
+        for params in self.target_net.parameters():
+            params.requires_grad = False
         
+   
         
     def store_experience(self, experience: tuple[np.ndarray, int, float, np.ndarray]) -> None:
         """
@@ -256,12 +253,18 @@ class DQNAgent():
         """
         state, action, reward, next_state = experience
         
-        # self.short_memory will also be updated when used in self._state_preprocessor
-        processed_state = self._state_preprocessor(state, self.short_memory)                 # Shape: (SHORT_MEMORY_SIZE, H, W)
+        # Adding some input verification to store experiences               
+        if state.shape[0] != self.input_shape[0]:
+            raise Exception(f"Unadequate state shape: {state.shape}. Must be: {self.input_shape}") 
+        
+        if next_state.shape[0] != self.input_shape[0]:
+            raise Exception(f"Unadequate next_state shape: {next_state.shape}. Must be: {self.input_shape}")
+        
+        print(self.device)
         self.memory.add(
             TensorDict(
                 {
-                    "state": torch.tensor(processed_state, dtype=torch.float32),
+                    "state": torch.tensor(state, dtype=torch.float32),
                     "action": torch.tensor(action, dtype=torch.float32),
                     "reward": torch.tensor(reward, dtype=torch.float32),
                     "next_state": torch.tensor(next_state,  dtype=torch.float32)
@@ -271,48 +274,67 @@ class DQNAgent():
         )
     
     
-    def react(self, state: np.ndarray):
+    def get_action(self, state: np.ndarray) -> np.ndarray:
+        """
+        Returns action given by the current policy.
+        Args:
+            state (np.ndarray): Shape can be (batch_size, NUM_CHANNELS, H, W) or (NUM_CHANNELS, H, W)
+
+        Raises:
+            Exception: _description_
+
+        Returns:
+            np.ndarray: _description_
+        """
         # GREEDY POLICY
-        # state: needs to handle both single and batch
-        
         prob = torch.rand(1)     
         if prob < self.epsilon:
             # Random action
             q_idx = torch.randint(low=0, high=self.num_actions, size=(1,))                  # Shape: (1,)
         else:
             # Greedy action
-            short_memory_cp = copy(self.short_memory)
-            processed_state = self._state_preprocessor(state, short_memory_cp)
-            processed_state = torch.tensor(processed_state[np.newaxis, :, :, :], 
-                                           dtype=torch.float32)                             # Shape: (1, SHORT_MEMORY_SIZE, H, W)
-            q_values = self.actor_net(processed_state)                                      # Shape: (1, num_actions)
+            # Flexible input handling whenever you want to provide information to NN.
+            if len(state.shape) == 3:
+                state = state[np.newaxis, :, :, :]                                                                             # Shape: (1,)
+            elif len(state.shape) > 4:
+                raise Exception(f"Unadequate input shape: {state.shape}, must be: (batch_size, NUM_CHANNELS, H, W)")
+            
+            state = torch.tensor(state, dtype=torch.float32).to(self.device)                      # Shape: (1, SHORT_MEMORY_SIZE, H, W)
+            q_values = self.actor_net(state)                                      # Shape: (1, num_actions)
             max_q = torch.max(q_values, dim=-1, keepdim=False)                      
-            q_idx = max_q.indices                                                           # Shape: (1,)
+            q_idx = max_q.indices       
+        
         return q_idx                                                                    
         
-
-    def learn(self):
+        
+    def _update_target_network(self, tau: float=0.01):
+        with torch.no_grad():
+            for target_params, actor_params in zip(self.target_net.parameters(), self.actor_net.parameters()):
+                target_params = tau*actor_params + (1-tau)*target_params
+    
+    
+    def update(self):
         self.optimizer.zero_grad()
         batch = self.memory.sample()           
-        states      = batch["state"]                                                        # shape: (batch_size, SHORT_MEMORY_SIZE, H, W)
-        actions     = batch["action"]                                                       # shape: (batch_size,)
-        rewards     = batch["reward"]                                                       # shape: (batch_size,)
-        next_states = batch["next_state"]                                                   # shape: (batch_size, SHORT_MEMORY_SIZE, H, W)
+        states      = batch["state"].to(self.device)                                                        # shape: (batch_size, SHORT_MEMORY_SIZE, H, W)
+        actions     = batch["action"].to(self.device)                                                       # shape: (batch_size,)
+        rewards     = batch["reward"].to(self.device)                                                       # shape: (batch_size,)
+        next_states = batch["next_state"].to(self.device)                                                   # shape: (batch_size, SHORT_MEMORY_SIZE, H, W)
         
-        print(f"states shape: {states.shape}")
-        print(f"actions shape: {actions.shape}")
-        print(f"rewards shape: {rewards.shape}")
-        print(f"next_states shape: {next_states.shape}")
+        #print(f"states shape: {states.shape}")
+        #print(f"actions shape: {actions.shape}")
+        #print(f"rewards shape: {rewards.shape}")
+        #print(f"next_states shape: {next_states.shape}")
         
-        #next_state_q_values = self.target_net(next_states)                                  # shape: (batch_size, num_actions)
-        #next_state_max_q_values = torch.max(next_state_q_values, dim=-1).values             # shape: (batch_size,)
-        #target_q_values = rewards + self.gamma*next_state_max_q_values                      # shape: (batch_size,)
-        print(type(states))
+        next_state_q_values = self.target_net(next_states)                                  # shape: (batch_size, num_actions)
+        next_state_max_q_values = torch.max(next_state_q_values, dim=-1).values             # shape: (batch_size,)
+        target_q_values = rewards + self.gamma*next_state_max_q_values                      # shape: (batch_size,)
         
         state_q_values = self.actor_net(states)                                             # shape: (batch_size, num_actions)
-        #current_q_values = state_q_values[torch.arange(self.batch_size), actions]           # shape: (batch_size,)
-        #self.loss(current_q_values, target_q_values)                                        # shape: (1,)
-        #self.loss.backward()
-        ## We should be only updating self.actor NO self.target yet
-        #self.optimizer.step()
-        
+        current_q_values = state_q_values[torch.arange(self.batch_size), actions.int()]           # shape: (batch_size,)
+        loss = self.criterion(current_q_values, target_q_values)                                        # shape: (1,)
+        loss.backward()
+        # We should be only updating self.actor NO self.target yet
+        self.optimizer.step()
+        # This step is to provide more stability to the learning phase
+        self._update_target_network()
