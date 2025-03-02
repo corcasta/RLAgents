@@ -203,7 +203,7 @@ class DQN(torch.nn.Module):
         x = self.activ4(self.dense2(x))
         return x
 
-def state_preprocessor(state: np.ndarray, short_memory: list) -> np.ndarray:
+def state_preprocessor(state: np.ndarray, short_memory: list, fixed_memory_len: int) -> np.ndarray:
     """
     Makes input RGB np.uint8 image to GRAY scale and returns
     a stack of the most recent images stored in short_memory.
@@ -221,8 +221,16 @@ def state_preprocessor(state: np.ndarray, short_memory: list) -> np.ndarray:
     """
     # State is now in BGR                                                  # Shape: (H, W)
     state_gray = cv2.cvtColor(state[:,:,::-1], cv2.COLOR_BGR2GRAY) 
-    _ = short_memory.pop(0)
-    short_memory.append(state_gray)
+    memory_len = len(short_memory)
+    
+    if memory_len == fixed_memory_len:
+        _ = short_memory.pop(0)
+        short_memory.append(state_gray)
+
+    elif memory_len < fixed_memory_len:
+        for i in range(fixed_memory_len-memory_len):
+             short_memory.append(state_gray)         
+        
     return np.array(short_memory)   
         
 class DQNAgent():
@@ -260,7 +268,6 @@ class DQNAgent():
         if next_state.shape[0] != self.input_shape[0]:
             raise Exception(f"Unadequate next_state shape: {next_state.shape}. Must be: {self.input_shape}")
         
-        print(self.device)
         self.memory.add(
             TensorDict(
                 {
