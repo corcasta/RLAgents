@@ -221,6 +221,9 @@ def state_preprocessor(state: np.ndarray, short_memory: list, fixed_memory_len: 
     """
     # State is now in BGR                                                  # Shape: (H, W)
     state_gray = cv2.cvtColor(state[:,:,::-1], cv2.COLOR_BGR2GRAY) 
+    state_gray = state_gray[32:195, 8:-8]
+    state_gray = cv2.resize(state_gray, (84,84))
+
     memory_len = len(short_memory)
     
     if memory_len == fixed_memory_len:

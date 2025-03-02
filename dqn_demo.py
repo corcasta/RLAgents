@@ -19,7 +19,7 @@ FIRST_N_FRAMES = 1000000
 MAX_STEPS = 10000
 SKIPPED_FRAMES = 4
 FRAME_BUFFER_LEN = 4
-IMAGE_SHAPE = (210, 160)
+IMAGE_SHAPE = (84, 84)
 INPUT_SHAPE = (FRAME_BUFFER_LEN, *IMAGE_SHAPE)
 
 
@@ -27,7 +27,7 @@ INPUT_SHAPE = (FRAME_BUFFER_LEN, *IMAGE_SHAPE)
 def main():
     # Environment SETUP
     gym.register_envs(ale_py)
-    env = gym.make("ALE/Breakout-v5", render_mode="human")
+    env = gym.make("ALE/Breakout-v5")#, render_mode="human")
    
 
     # Agent SETUP
@@ -102,6 +102,7 @@ def main():
         
         # Update TQDM bar
         epoch_pg_bar.set_description(desc=f"Epoch: {epoch}")
+        epoch_pg_bar.set_postfix({"avg_reward": avg_reward, "games": played_games})
         epoch_pg_bar.update()
         
         
