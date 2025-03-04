@@ -181,18 +181,18 @@ class DQN(torch.nn.Module):
     def __init__(self, input_shape, num_actions):
         super().__init__()
         self.conv1  = torch.nn.Conv2d(in_channels=input_shape[0], out_channels=16, kernel_size=8)
-        self.activ1 = torch.nn.ReLU()
+        self.activ1 = torch.nn.LeakyReLU()
         
         self.conv2  = torch.nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)
-        self.activ2 = torch.nn.ReLU()
+        self.activ2 = torch.nn.LeakyReLU()
         
         sample = torch.rand(size=(input_shape))
         self.dense1 = torch.nn.Linear(in_features=torch.flatten(self.conv2(self.conv1(sample))).shape[0], 
                                       out_features=256)
-        self.activ3 = torch.nn.ReLU()
+        self.activ3 = torch.nn.LeakyReLU()
         
         self.dense2 = torch.nn.Linear(in_features=256, out_features=num_actions) 
-        self.activ4 = torch.nn.ReLU()
+        self.activ4 = torch.nn.Softmax(dim=-1)
         del sample
      
     def forward(self, x):
@@ -202,6 +202,15 @@ class DQN(torch.nn.Module):
         x = self.activ3(self.dense1(x))
         x = self.activ4(self.dense2(x))
         return x
+
+
+def reward_clipping(reward: int):
+    if reward > 0:
+        reward = 1
+    if reward < 0:
+        reward = -1
+    return reward
+
 
 def state_preprocessor(state: np.ndarray, short_memory: list, fixed_memory_len: int) -> np.ndarray:
     """
@@ -249,20 +258,21 @@ class DQNAgent():
         self.criterion      = torch.nn.MSELoss()
         self.device         = device
         self.gamma = 0.99
+        
         # Deactivating target network parameters for updating through backpropagation
         for params in self.target_net.parameters():
             params.requires_grad = False
         
    
         
-    def store_experience(self, experience: tuple[np.ndarray, int, float, np.ndarray]) -> None:
+    def store_experience(self, experience: tuple[np.ndarray, int, float, np.ndarray, bool]) -> None:
         """
         Stores experience tuple in replay buffer/memory
 
         Args:
             experience (tuple[np.ndarray, int, float, np.ndarray]): _description_
         """
-        state, action, reward, next_state = experience
+        state, action, reward, next_state, done = experience
         
         # Adding some input verification to store experiences               
         if state.shape[0] != self.input_shape[0]:
@@ -277,7 +287,8 @@ class DQNAgent():
                     "state": torch.tensor(state, dtype=torch.float32),
                     "action": torch.tensor(action, dtype=torch.float32),
                     "reward": torch.tensor(reward, dtype=torch.float32),
-                    "next_state": torch.tensor(next_state,  dtype=torch.float32)
+                    "next_state": torch.tensor(next_state,  dtype=torch.float32),
+                    "done": torch.tensor(done, dtype=torch.bool)
                 }
             )
             
@@ -301,9 +312,10 @@ class DQNAgent():
         if prob < self.epsilon:
             # Random action
             q_idx = torch.randint(low=0, high=self.num_actions, size=(1,))                  # Shape: (1,)
+
         else:
             # Greedy action
-            # Flexible input handling whenever you want to provide information to NN.
+            # Flexible input handling, whenever you want to provide information to NN.
             if len(state.shape) == 3:
                 state = state[np.newaxis, :, :, :]                                                                             # Shape: (1,)
             elif len(state.shape) > 4:
@@ -312,39 +324,35 @@ class DQNAgent():
             state = torch.tensor(state, dtype=torch.float32).to(self.device)                      # Shape: (1, SHORT_MEMORY_SIZE, H, W)
             q_values = self.actor_net(state)                                      # Shape: (1, num_actions)
             max_q = torch.max(q_values, dim=-1, keepdim=False)                      
-            q_idx = max_q.indices       
-        
+            q_idx = max_q.indices 
+       
         return q_idx                                                                    
         
         
     def _update_target_network(self, tau: float=0.01):
         with torch.no_grad():
             for target_params, actor_params in zip(self.target_net.parameters(), self.actor_net.parameters()):
-                target_params = tau*actor_params + (1-tau)*target_params
+                updated_params = tau*actor_params + (1-tau)*target_params
+                target_params.copy_(updated_params)
     
     
     def update(self):
         self.optimizer.zero_grad()
         batch = self.memory.sample()           
-        states      = batch["state"].to(self.device)                                                        # shape: (batch_size, SHORT_MEMORY_SIZE, H, W)
-        actions     = batch["action"].to(self.device)                                                       # shape: (batch_size,)
-        rewards     = batch["reward"].to(self.device)                                                       # shape: (batch_size,)
-        next_states = batch["next_state"].to(self.device)                                                   # shape: (batch_size, SHORT_MEMORY_SIZE, H, W)
-        
-        #print(f"states shape: {states.shape}")
-        #print(f"actions shape: {actions.shape}")
-        #print(f"rewards shape: {rewards.shape}")
-        #print(f"next_states shape: {next_states.shape}")
+        states      = batch["state"].to(self.device)                                        # shape: (batch_size, SHORT_MEMORY_SIZE, H, W)
+        actions     = batch["action"].to(self.device)                                       # shape: (batch_size,)
+        rewards     = batch["reward"].to(self.device)                                       # shape: (batch_size,)
+        next_states = batch["next_state"].to(self.device)                                   # shape: (batch_size, SHORT_MEMORY_SIZE, H, W)
+        done        = batch["done"].to(self.device)
+
         
         next_state_q_values = self.target_net(next_states)                                  # shape: (batch_size, num_actions)
         next_state_max_q_values = torch.max(next_state_q_values, dim=-1).values             # shape: (batch_size,)
-        target_q_values = rewards + self.gamma*next_state_max_q_values                      # shape: (batch_size,)
+        target_q_values = rewards + (done*self.gamma*next_state_max_q_values)               # shape: (batch_size,)
         
         state_q_values = self.actor_net(states)                                             # shape: (batch_size, num_actions)
-        current_q_values = state_q_values[torch.arange(self.batch_size), actions.int()]           # shape: (batch_size,)
-        loss = self.criterion(current_q_values, target_q_values)                                        # shape: (1,)
+        current_q_values = state_q_values[torch.arange(self.batch_size), actions.int()]     # shape: (batch_size,)
+        loss = self.criterion(current_q_values, target_q_values)                            # shape: (1,)
         loss.backward()
-        # We should be only updating self.actor NO self.target yet
-        self.optimizer.step()
-        # This step is to provide more stability to the learning phase
-        self._update_target_network()
+        self.optimizer.step()                                                               # We should be only updating self.actor NO self.target yet
+        self._update_target_network()                                                       # This step is to provide more stability to the learning phase
