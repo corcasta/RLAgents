@@ -229,9 +229,9 @@ def state_preprocessor(state: np.ndarray, short_memory: list, fixed_memory_len: 
                     dtype: np.uint8
     """
     # State is now in BGR                                                  # Shape: (H, W)
-    state_gray = cv2.cvtColor(state[:,:,::-1], cv2.COLOR_BGR2GRAY) 
-    state_gray = state_gray[32:195, 8:-8]
-    state_gray = cv2.resize(state_gray, (84,84))
+    #state_gray = cv2.cvtColor(state[:,:,::-1], cv2.COLOR_BGR2GRAY) 
+    #state_gray = state_gray[32:195, 8:-8]
+    state_gray = cv2.resize(state, (84,84))
 
     memory_len = len(short_memory)
     
@@ -295,7 +295,7 @@ class DQNAgent():
         )
     
     
-    def get_action(self, state: np.ndarray) -> np.ndarray:
+    def get_action(self, state: np.ndarray) -> int:
         """
         Returns action given by the current policy.
         Args:
@@ -305,7 +305,7 @@ class DQNAgent():
             Exception: _description_
 
         Returns:
-            np.ndarray: _description_
+            int: discrete action
         """
         # GREEDY POLICY
         prob = torch.rand(1)     
@@ -324,9 +324,9 @@ class DQNAgent():
             state = torch.tensor(state, dtype=torch.float32).to(self.device)                      # Shape: (1, SHORT_MEMORY_SIZE, H, W)
             q_values = self.actor_net(state)                                      # Shape: (1, num_actions)
             max_q = torch.max(q_values, dim=-1, keepdim=False)                      
-            q_idx = max_q.indices 
+            q_idx = max_q.indices
        
-        return q_idx                                                                    
+        return q_idx.item()                                                                    
         
         
     def _update_target_network(self, tau: float=0.01):
