@@ -180,27 +180,31 @@ from torchrl.data import TensorDictReplayBuffer, LazyTensorStorage
 class DQN(torch.nn.Module):
     def __init__(self, input_shape, num_actions):
         super().__init__()
-        self.conv1  = torch.nn.Conv2d(in_channels=input_shape[0], out_channels=16, kernel_size=8)
-        self.activ1 = torch.nn.LeakyReLU()
+        self.conv1  = torch.nn.Conv2d(in_channels=input_shape[0], out_channels=32, kernel_size=8, stride=4)
+        self.activ1 = torch.nn.ReLU()
         
-        self.conv2  = torch.nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)
-        self.activ2 = torch.nn.LeakyReLU()
+        self.conv2  = torch.nn.Conv2d(in_channels=32, out_channels=64, kernel_size=4, stride=2)
+        self.activ2 = torch.nn.ReLU()
+        
+        self.conv3  = torch.nn.Conv2d(in_channels=64, out_channels=64, kernel_size=3, stride=1)
+        self.activ3 = torch.nn.ReLU()
         
         sample = torch.rand(size=(input_shape))
-        self.dense1 = torch.nn.Linear(in_features=torch.flatten(self.conv2(self.conv1(sample))).shape[0], 
-                                      out_features=256)
-        self.activ3 = torch.nn.LeakyReLU()
+        self.dense1 = torch.nn.Linear(in_features=torch.flatten(self.conv3(self.conv2(self.conv1(sample)))).shape[0], 
+                                      out_features=256*2)
+        self.activ4 = torch.nn.ReLU()
         
-        self.dense2 = torch.nn.Linear(in_features=256, out_features=num_actions) 
-        self.activ4 = torch.nn.Softmax(dim=-1)
+        self.dense2 = torch.nn.Linear(in_features=256*2, out_features=num_actions) 
+        #self.activ4 = torch.nn.Softmax(dim=-1)
         del sample
      
     def forward(self, x):
         x = self.activ1(self.conv1(x))
         x = self.activ2(self.conv2(x))
+        x = self.activ3(self.conv3(x))
         x = torch.flatten(x, start_dim=1)
-        x = self.activ3(self.dense1(x))
-        x = self.activ4(self.dense2(x))
+        x = self.activ4(self.dense1(x))
+        x = self.dense2(x)
         return x
 
 
@@ -212,7 +216,7 @@ def reward_clipping(reward: int):
     return reward
 
 
-def state_preprocessor(state: np.ndarray, short_memory: list, fixed_memory_len: int) -> np.ndarray:
+def state_preprocessor(state: np.ndarray):#, short_memory: list, fixed_memory_len: int) -> np.ndarray:
     """
     Makes input RGB np.uint8 image to GRAY scale and returns
     a stack of the most recent images stored in short_memory.
@@ -230,20 +234,21 @@ def state_preprocessor(state: np.ndarray, short_memory: list, fixed_memory_len: 
     """
     # State is now in BGR                                                  # Shape: (H, W)
     #state_gray = cv2.cvtColor(state[:,:,::-1], cv2.COLOR_BGR2GRAY) 
-    #state_gray = state_gray[32:195, 8:-8]
-    state_gray = cv2.resize(state, (84,84))
-
-    memory_len = len(short_memory)
+    #state = state[32:195, 8:-8]
+    #state_gray = cv2.resize(state, (84,84))
+    #memory_len = len(short_memory)
+    #if memory_len == fixed_memory_len:
+    #    _ = short_memory.pop(0)
+    #    short_memory.append(state_gray)
+    #elif memory_len < fixed_memory_len:
+    #    for i in range(fixed_memory_len-memory_len):
+    #         short_memory.append(state_gray)         
     
-    if memory_len == fixed_memory_len:
-        _ = short_memory.pop(0)
-        short_memory.append(state_gray)
-
-    elif memory_len < fixed_memory_len:
-        for i in range(fixed_memory_len-memory_len):
-             short_memory.append(state_gray)         
-        
-    return np.array(short_memory)   
+    state = state[:, 32:195, 8:-8]
+    state = state.transpose(1,2,0)
+    state = cv2.resize(state, (84,84))
+    state = state.transpose(2, 0, 1)
+    return state
         
 class DQNAgent():
     def __init__(self, input_shape, num_actions, memory_size, batch_size, epsilon, device):
@@ -329,7 +334,7 @@ class DQNAgent():
         return q_idx.item()                                                                    
         
         
-    def _update_target_network(self, tau: float=0.01):
+    def _update_target_network(self, tau: float=0.001):
         with torch.no_grad():
             for target_params, actor_params in zip(self.target_net.parameters(), self.actor_net.parameters()):
                 updated_params = tau*actor_params + (1-tau)*target_params
@@ -356,3 +361,4 @@ class DQNAgent():
         loss.backward()
         self.optimizer.step()                                                               # We should be only updating self.actor NO self.target yet
         self._update_target_network()                                                       # This step is to provide more stability to the learning phase
+        return loss.item()
